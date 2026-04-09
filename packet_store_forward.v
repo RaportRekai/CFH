@@ -1,23 +1,5 @@
 `timescale 1ns / 1ps
-/*
-The module should now have two kinds of buffers
-one for packet descriptor - we only need where the packet begins and where it ends
-other for packet data - we keep track of tkeep tdata and tuser for each beat
-the data width for tdata beat is 64 bits
-the data width for tkeep beat is 8 bits
-the data width for tuser beat is ?
-the data widht for tlast is 1 bit
-the data width for index of the start beat of packet will be log2(TOTAL_SPACE/64)
-same would be the data widht for end beat of packet
 
-and the packet data is a circular buffer while the packet descriptor is a fifo,
-when packets arrive we do make an entry into the packet tdata,tkeep,tuser,tlast ring buffers and also to the packet descriptor fifo.
-subsequent beats dont have an entry into the packet descriptor fifo until the last beat of the packet arrives, 
-then we make an entry into the packet descriptor fifo with the length of the packet.
-the data memory buffers can have its own write and read pointers
-the PD memory buffer should have its own write and read pointers
-
-*/
 module packet_store_forward #(
     parameter DATA_WIDTH    = 64,
     parameter KEEP_WIDTH    = (DATA_WIDTH/8),
@@ -57,18 +39,53 @@ reg [BYTE_CNT_W-1:0] beat_start;
 reg [BYTE_IDX_W-1:0] byte_index_in_beat;
 reg [DATA_WIDTH-1:0] modified_tdata;
 
+//packet captured from AXIS
 reg [1514*8-1:0]packet_bytes;
+
+// modified packets after analysis
+wire [1514*8-1:0]m_packet_bytes;
+reg [1514*8-1:0] send_packet;
+
+
 
 // Added only for tuser storage: one tuser per stored beat
 reg [MAX_BEATS*RX_USER_WIDTH-1:0] packet_tuser;
 
 reg start_packet_accept;
 reg [7:0]beat_counter;
+wire [7:0]mod_beat_counter;
 reg [7:0]write_beat_count;
 reg valid_packet_buffer;
 reg [7:0]last_tkeep;
+wire [7:0]mod_last_tkeep;
+
+//packet analysis control registers
+reg start_analysis;
+wire drop_packet;
+wire valid_packet;
+
+reg send_phase;
 
 /////////////////////////////////
+
+
+
+
+//packet analysis module
+analyse_stored_packet #(
+)
+analyse_packet_inst(
+.clk(clk),
+.start_analysis(start_analysis),
+.packet_bytes(packet_bytes),
+.modified_packet_bytes(m_packet_bytes),
+.drop_packet(drop_packet),
+.valid(valid_packet),
+.last_tkeep(last_tkeep),
+.beat_counter(beat_counter),
+.mod_beat_counter(mod_beat_counter),
+.mod_last_tkeep(mod_last_tkeep)
+);
 
 always @(posedge clk) begin
 if (rst)begin
@@ -85,8 +102,20 @@ m_axis_tkeep<=0;
 m_axis_tvalid<=0;
 m_axis_tlast<=0;
 m_axis_tuser<=0;
+send_phase<=0;
 end
 else begin
+
+    // lock valid packets in a reg and only accept when send_phase = 0
+    if (send_phase == 0)
+    begin
+        if (valid_packet == 1 && drop_packet == 0)
+        begin
+            send_packet<= m_packet_bytes;
+            send_phase<=1;
+        end
+    end
+    
     // Starting to store packets
     if (s_start_packet!=0 && valid_packet_buffer==0)
     begin
@@ -127,6 +156,9 @@ else begin
         write_beat_count<=0;
         last_tkeep<=s_axis_tkeep;
         
+        // call packet analysis module here
+        start_analysis <=1;
+        
         m_axis_tdata<=64'b0;
         m_axis_tkeep<=8'b0;
         m_axis_tvalid<=0;
@@ -135,27 +167,38 @@ else begin
         start_packet_accept<=0;
     end
     
-    else if (valid_packet_buffer)
+    else if (start_analysis == 1)
     begin
+        start_analysis <= 0;
+        valid_packet_buffer<=0;
+    end
+    
+    else if (send_phase == 1)
+    begin
+        // stop analysis
+        start_analysis <=0;
+        
         if (write_beat_count ==0)
             m_start_packet<=2'b01;
         else
             m_start_packet<=0;
         
-        m_axis_tdata<=packet_bytes[write_beat_count*64+:64];
+        m_axis_tdata<=send_packet[write_beat_count*64+:64];
         
         m_axis_tvalid<=1;
         
-        // changed: replay stored tuser for this beat
-        m_axis_tuser<=packet_tuser[write_beat_count*RX_USER_WIDTH +: RX_USER_WIDTH];
+        // changed: replay stored tuser for this beat - we might have to test the behaviour when we set it to 0
+        m_axis_tuser<=0;//packet_tuser[write_beat_count*RX_USER_WIDTH +: RX_USER_WIDTH];
         
+        // we have to change write beat count
         write_beat_count<=write_beat_count+1;
-        if (beat_counter == write_beat_count)
+        if (mod_beat_counter == write_beat_count)
         begin
             m_axis_tlast <= 1'b1;
-            m_axis_tkeep<= last_tkeep;
-            valid_packet_buffer<=0;
+            m_axis_tkeep<= mod_last_tkeep;
+            
             beat_counter<=0;
+            send_phase<=0;
         end
         else
         begin
@@ -164,6 +207,8 @@ else begin
         end
         
     end
+    
+    
     else if (m_axis_tlast ==1)
     begin
         m_axis_tlast<=0;
