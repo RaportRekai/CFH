@@ -63,6 +63,8 @@ wire [7:0]mod_last_tkeep;
 reg start_analysis;
 wire drop_packet;
 wire valid_packet;
+reg [MAX_BEATS*RX_USER_WIDTH-1:0]m_axis_tuser_1;
+reg [MAX_BEATS*RX_USER_WIDTH-1:0]m_axis_tuser_2;
 
 reg send_phase;
 
@@ -113,6 +115,7 @@ else begin
         begin
             send_packet<= m_packet_bytes;
             send_phase<=1;
+            m_axis_tuser_2 <= m_axis_tuser_1;
         end
     end
     
@@ -158,6 +161,7 @@ else begin
         
         // call packet analysis module here
         start_analysis <=1;
+
         
         m_axis_tdata<=64'b0;
         m_axis_tkeep<=8'b0;
@@ -171,6 +175,7 @@ else begin
     begin
         start_analysis <= 0;
         valid_packet_buffer<=0;
+        m_axis_tuser_1<= packet_tuser;
     end
     
     else if (send_phase == 1)
@@ -184,11 +189,12 @@ else begin
             m_start_packet<=0;
         
         m_axis_tdata<=send_packet[write_beat_count*64+:64];
+        m_axis_tuser <= m_axis_tuser_2[write_beat_count*RX_USER_WIDTH+:RX_USER_WIDTH];
         
         m_axis_tvalid<=1;
         
         // changed: replay stored tuser for this beat - we might have to test the behaviour when we set it to 0
-        m_axis_tuser<=0;//packet_tuser[write_beat_count*RX_USER_WIDTH +: RX_USER_WIDTH];
+        //m_axis_tuser<=0;//packet_tuser[write_beat_count*RX_USER_WIDTH +: RX_USER_WIDTH];
         
         // we have to change write beat count
         write_beat_count<=write_beat_count+1;
