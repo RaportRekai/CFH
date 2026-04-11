@@ -169,146 +169,151 @@ begin
     // Scrape from packet and drop
     if (start_analysis == 1)
     begin
-        valid_next<=1;
-        mod_beat_counter_next<=beat_counter;
-        mod_last_tkeep_next<= last_tkeep;
-        // check for ipv4
-        if (packet_bytes[IP_CHECK +:16] == 16'h800)
-        begin
-            if(packet_bytes[IPV4_PROT_NO_BYTE +:8] == 8'd6)
-            begin
-                if(packet_bytes[TCP_DEST_PORT +:16] == 16'd10001)
-                begin
+    modified_packet_bytes_next<= packet_bytes;
+    valid_next<=1;
+    mod_beat_counter_next<=beat_counter;
+    mod_last_tkeep_next<= last_tkeep;
+//    begin
+//        valid_next<=1;
+//        mod_beat_counter_next<=beat_counter;
+//        mod_last_tkeep_next<= last_tkeep;
+//        // check for ipv4
+//        if (packet_bytes[IP_CHECK +:16] == 16'h800)
+//        begin
+//            if(packet_bytes[IPV4_PROT_NO_BYTE +:8] == 8'd6)
+//            begin
+//                if(packet_bytes[TCP_DEST_PORT +:16] == 16'd10001)
+//                begin
                     
-                    // Packet scraping
+//                    // Packet scraping
                     
-                    host_tel_data_A <= packet_bytes[STRIP_DATA_A+:8];
-                    host_tel_data_B <= packet_bytes[STRIP_DATA_B+:32];
-                    host_tel_data_C <= packet_bytes[STRIP_DATA_C+:32];
+//                    host_tel_data_A <= packet_bytes[STRIP_DATA_A+:8];
+//                    host_tel_data_B <= packet_bytes[STRIP_DATA_B+:32];
+//                    host_tel_data_C <= packet_bytes[STRIP_DATA_C+:32];
                     
-                    //drop the packet
+//                    //drop the packet
                     
-                    modified_packet_bytes_next <= 0;
-                    drop_packet_next<=1;
-                end
+//                    modified_packet_bytes_next <= 0;
+//                    drop_packet_next<=1;
+//                end
                 
-                else
-                begin
-                    modified_packet_bytes_next<=packet_bytes;
-                    drop_packet_next<=0;
-                end
-            end
+//                else
+//                begin
+//                    modified_packet_bytes_next<=packet_bytes;
+//                    drop_packet_next<=0;
+//                end
+//            end
        
     
     
-        //Type B - CFH Distress
-        /*
-        This data comes from the the atlas machine to the software load balancer. 
-        It houses telemetry information that the fpga uses later on.
+//        //Type B - CFH Distress
+//        /*
+//        This data comes from the the atlas machine to the software load balancer. 
+//        It houses telemetry information that the fpga uses later on.
         
-        IPV4_PROT_NO_BYTE = 112+64+8;//8 bits has to be 
-        TCP_DEST_PORT = 272+16 //16 bits has to be 4791
-        STRIP_DATA_A = 432;//8 bits
-        STRIP_DATA_B = 440;//32 bits
-        STRIP_DATA_C = 472;//32 bits
-        */
+//        IPV4_PROT_NO_BYTE = 112+64+8;//8 bits has to be 
+//        TCP_DEST_PORT = 272+16 //16 bits has to be 4791
+//        STRIP_DATA_A = 432;//8 bits
+//        STRIP_DATA_B = 440;//32 bits
+//        STRIP_DATA_C = 472;//32 bits
+//        */
         
         
-        // Stage 1: modify the packet
+//        // Stage 1: modify the packet
         
-            else if(packet_bytes[IPV4_PROT_NO_BYTE+:8] == 8'd17)
-            begin
-                drop_packet_next<=0;
-                if(packet_bytes[TCP_DEST_PORT+:16] == 16'd4791)
-                begin
-                    if (score>THRESH)
-                    begin
-                    // Packet mod
-                        modified_packet_bytes_next[IP_LEN-1:0] <= packet_bytes[IP_LEN-1:0];
-                        modified_packet_bytes_next[IP_LEN+:16] <= EXTRA_LEN + packet_bytes[IP_LEN+:16];
-                        modified_packet_bytes_next[TCP_DEST_PORT-1:IP_LEN+16-1]<= packet_bytes[TCP_DEST_PORT-1:IP_LEN+16-1];
-                        modified_packet_bytes_next[TCP_DEST_PORT+:16] <= 16'd49112;
-                        modified_packet_bytes_next[UDP_LEN+:16] <= EXTRA_LEN + packet_bytes[UDP_LEN+:16];
-                        modified_packet_bytes_next[272+64+(EXTRA_LEN)*8-1:272+64] <= {LB_ID,
-                                                        RDMA_CONFIG,
-                                                        HOST_ID,
-                                                        TTL,
-                                                        CFH_MSG};
-                        modified_packet_bytes_next[1514*8-1:272+64+(EXTRA_LEN)*8] <= packet_bytes[1514*8-1:272+64];
+//            else if(packet_bytes[IPV4_PROT_NO_BYTE+:8] == 8'd17)
+//            begin
+//                drop_packet_next<=0;
+//                if(packet_bytes[TCP_DEST_PORT+:16] == 16'd4791)
+//                begin
+//                    if (score>THRESH)
+//                    begin
+//                    // Packet mod
+//                        modified_packet_bytes_next[IP_LEN-1:0] <= packet_bytes[IP_LEN-1:0];
+//                        modified_packet_bytes_next[IP_LEN+:16] <= EXTRA_LEN + packet_bytes[IP_LEN+:16];
+//                        modified_packet_bytes_next[TCP_DEST_PORT-1:IP_LEN+16-1]<= packet_bytes[TCP_DEST_PORT-1:IP_LEN+16-1];
+//                        modified_packet_bytes_next[TCP_DEST_PORT+:16] <= 16'd49112;
+//                        modified_packet_bytes_next[UDP_LEN+:16] <= EXTRA_LEN + packet_bytes[UDP_LEN+:16];
+//                        modified_packet_bytes_next[272+64+(EXTRA_LEN)*8-1:272+64] <= {LB_ID,
+//                                                        RDMA_CONFIG,
+//                                                        HOST_ID,
+//                                                        TTL,
+//                                                        CFH_MSG};
+//                        modified_packet_bytes_next[1514*8-1:272+64+(EXTRA_LEN)*8] <= packet_bytes[1514*8-1:272+64];
                         
-                        // we will have to strip the current cksum and use it for calculation in the next clk cycle
-                        ip_checksum <= ~packet_bytes[IP_CKS:+16];
-                        udp_checksum <= ~packet_bytes[UDP_CKS:+16];
+//                        // we will have to strip the current cksum and use it for calculation in the next clk cycle
+//                        ip_checksum <= ~packet_bytes[IP_CKS:+16];
+//                        udp_checksum <= ~packet_bytes[UDP_CKS:+16];
                         
-                        // update beat_counter
-                        // we have to find the number of bytes still left in the axis and then adjust accordingly
-                        if (last_tkeep == 8'b1)
-                        begin
-                            mod_last_tkeep_next<=8'b1111111;
-                            mod_beat_counter_next <= beat_counter+1;
-                        end
-                        else if (last_tkeep == 8'b11)
-                        begin
-                            mod_last_tkeep_next<=8'b11111111;
-                            mod_beat_counter_next <= beat_counter+1;
-                        end
-                        else if (last_tkeep == 8'b111)
-                        begin
-                            mod_last_tkeep_next<=8'b1;
-                            mod_beat_counter_next <= beat_counter+2;
-                        end
-                        else if (last_tkeep == 8'b1111)
-                        begin
-                            mod_last_tkeep_next<=8'b11;
-                            mod_beat_counter_next <= beat_counter+2;
-                        end
-                        else if (last_tkeep == 8'b11111)
-                        begin
-                            mod_last_tkeep_next<=8'b111;
-                            mod_beat_counter_next <= beat_counter+2;
-                        end
-                        else if (last_tkeep == 8'b111111)
-                        begin
-                            mod_last_tkeep_next<=8'b1111;
-                            mod_beat_counter_next <= beat_counter+2;
-                        end
-                        else if (last_tkeep == 8'b1111111)
-                        begin
-                            mod_last_tkeep_next<=8'b11111;
-                            mod_beat_counter_next <= beat_counter+2;
-                        end
-                        else if (last_tkeep == 8'b11111111)
-                        begin
-                            mod_last_tkeep_next<=8'b111111;
-                            mod_beat_counter_next <= beat_counter+2;
-                        end
+//                        // update beat_counter
+//                        // we have to find the number of bytes still left in the axis and then adjust accordingly
+//                        if (last_tkeep == 8'b1)
+//                        begin
+//                            mod_last_tkeep_next<=8'b1111111;
+//                            mod_beat_counter_next <= beat_counter+1;
+//                        end
+//                        else if (last_tkeep == 8'b11)
+//                        begin
+//                            mod_last_tkeep_next<=8'b11111111;
+//                            mod_beat_counter_next <= beat_counter+1;
+//                        end
+//                        else if (last_tkeep == 8'b111)
+//                        begin
+//                            mod_last_tkeep_next<=8'b1;
+//                            mod_beat_counter_next <= beat_counter+2;
+//                        end
+//                        else if (last_tkeep == 8'b1111)
+//                        begin
+//                            mod_last_tkeep_next<=8'b11;
+//                            mod_beat_counter_next <= beat_counter+2;
+//                        end
+//                        else if (last_tkeep == 8'b11111)
+//                        begin
+//                            mod_last_tkeep_next<=8'b111;
+//                            mod_beat_counter_next <= beat_counter+2;
+//                        end
+//                        else if (last_tkeep == 8'b111111)
+//                        begin
+//                            mod_last_tkeep_next<=8'b1111;
+//                            mod_beat_counter_next <= beat_counter+2;
+//                        end
+//                        else if (last_tkeep == 8'b1111111)
+//                        begin
+//                            mod_last_tkeep_next<=8'b11111;
+//                            mod_beat_counter_next <= beat_counter+2;
+//                        end
+//                        else if (last_tkeep == 8'b11111111)
+//                        begin
+//                            mod_last_tkeep_next<=8'b111111;
+//                            mod_beat_counter_next <= beat_counter+2;
+//                        end
                   
-                        // enable checksum on the modified packet
-                        enable_cks <= 1;
-                    end
-                    else
-                        modified_packet_bytes_next <= packet_bytes;
+//                        // enable checksum on the modified packet
+//                        enable_cks <= 1;
+//                    end
+//                    else
+//                        modified_packet_bytes_next <= packet_bytes;
                        
-                end
-                else
-                    modified_packet_bytes_next <= packet_bytes;
-            end
+//                end
+//                else
+//                    modified_packet_bytes_next <= packet_bytes;
+//            end
             
             
             
-            else
-            begin
-                modified_packet_bytes_next <= packet_bytes;
-                drop_packet_next<=0;
-            end
+//            else
+//            begin
+//                modified_packet_bytes_next <= packet_bytes;
+//                drop_packet_next<=0;
+//            end
             
-        end
+//        end
         
-        else
-        begin
-            modified_packet_bytes_next <= packet_bytes;
-            drop_packet_next<=0;
-        end
+//        else
+//        begin
+//            modified_packet_bytes_next <= packet_bytes;
+//            drop_packet_next<=0;
+//        end
             
     end
     
