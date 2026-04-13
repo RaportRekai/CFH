@@ -39,12 +39,11 @@ reg [BYTE_CNT_W-1:0] beat_start;
 reg [BYTE_IDX_W-1:0] byte_index_in_beat;
 reg [DATA_WIDTH-1:0] modified_tdata;
 
-//packet captured from AXIS
-reg [1514*8-1:0]packet_bytes;
+
 
 // modified packets after analysis
 wire [1514*8-1:0]m_packet_bytes;
-reg [1514*8-1:0] send_packet;
+
 
 
 
@@ -63,168 +62,267 @@ wire [7:0]mod_last_tkeep;
 reg start_analysis;
 wire drop_packet;
 wire valid_packet;
-reg [MAX_BEATS*RX_USER_WIDTH-1:0]m_axis_tuser_1;
-reg [MAX_BEATS*RX_USER_WIDTH-1:0]m_axis_tuser_2;
 
 reg send_phase;
-
+reg send_phase_warmup;
+reg send_phase_shutdown;
 /////////////////////////////////
+localparam PHASE_IDLE    = 2'd0,
+           PHASE_CAPTURE = 2'd1,
+           PHASE_ANALYZE = 2'd2,
+           PHASE_SEND    = 2'd3;
+
+reg [1:0] phase;
 
 
 
+
+////////////////////////
+reg  [7:0]  parent_r_add;
+reg  [7:0]  parent_w_add;
+reg  [63:0] parent_data_in;
+reg         parent_write_en;
+
+wire [7:0]  ana_r_add;
+wire [7:0]  ana_w_add;
+wire [63:0] ana_data_in;
+wire        ana_write_en;
+
+wire [7:0]  bram_r_add;
+wire [7:0]  bram_w_add;
+wire [63:0] bram_data_in;
+wire        bram_write_en;
+wire [63:0] data_out;
+
+assign bram_r_add    = (phase == PHASE_ANALYZE) ? ana_r_add    : parent_r_add;
+assign bram_w_add    = (phase == PHASE_ANALYZE) ? ana_w_add    : parent_w_add;
+assign bram_data_in  = (phase == PHASE_ANALYZE) ? ana_data_in  : parent_data_in;
+assign bram_write_en = (phase == PHASE_ANALYZE) ? ana_write_en : parent_write_en;
+
+
+////////////////////////
 
 //packet analysis module
-analyse_stored_packet #(
-)
-analyse_packet_inst(
+wire        need_cfh_header;
+
+analyse_stored_packet analyse_packet_inst (
+    .clk(clk),
+    .rst(rst),
+    .start_analysis(start_analysis),
+
+    .beat_counter(beat_counter),
+    .last_tkeep(last_tkeep),
+
+    .r_add(ana_r_add),
+    .w_add(ana_w_add),
+    .data_in(ana_data_in),
+    .data_out(data_out),
+    .write_en(ana_write_en),
+
+    .drop_packet(drop_packet),
+    .valid(valid_packet),
+    .need_cfh_header(need_cfh_header),
+    .mod_beat_counter(mod_beat_counter),
+    .mod_last_tkeep(mod_last_tkeep)
+);
+
+
+
+bram bram_inst(
 .clk(clk),
-.start_analysis(start_analysis),
-.packet_bytes(packet_bytes),
-.modified_packet_bytes(m_packet_bytes),
-.drop_packet(drop_packet),
-.valid(valid_packet),
-.last_tkeep(last_tkeep),
-.beat_counter(beat_counter),
-.mod_beat_counter(mod_beat_counter),
-.mod_last_tkeep(mod_last_tkeep)
+.rst(1'b0),
+.data_in(bram_data_in),
+.data_out(data_out),
+.w_add(bram_w_add),
+.r_add(bram_r_add),
+.write_en(bram_write_en)
 );
 
 always @(posedge clk) begin
-if (rst)begin
-packet_bytes<=0;
-packet_tuser<=0;               // added
-beat_counter<=0;
-start_packet_accept<=0;
-valid_packet_buffer<=0;
-write_beat_count<=0;
-last_tkeep<=0;
-m_start_packet<=0;
-m_axis_tdata<=0;
-m_axis_tkeep<=0;
-m_axis_tvalid<=0;
-m_axis_tlast<=0;
-m_axis_tuser<=0;
-send_phase<=0;
-end
-else begin
-
-    // lock valid packets in a reg and only accept when send_phase = 0
-    if (send_phase == 0)
+    if (rst)
     begin
-        if (valid_packet == 1 && drop_packet == 0)
-        begin
-            send_packet<= m_packet_bytes;
-            send_phase<=1;
-            m_axis_tuser_2 <= m_axis_tuser_1;
-        end
-    end
-    
-    // Starting to store packets
-    if (s_start_packet!=0 && valid_packet_buffer==0)
-    begin
-    m_axis_tdata<=64'b0;
-    m_axis_tkeep<=8'b0;
-    m_axis_tvalid<=0;
-    m_axis_tuser<=0;           // changed: do not mirror live input during idle
-    m_axis_tlast<=0;
-    
-    start_packet_accept <= 1;
-        if (s_axis_tvalid)
-        begin
-            packet_bytes[63:0] <= s_axis_tdata;
-            packet_tuser[0 +: RX_USER_WIDTH] <= s_axis_tuser;   // added
-            beat_counter<=1;
-        end
-    end
-    // proceeding to store packet in the buffer
-    else if (start_packet_accept == 1 && s_axis_tvalid && s_axis_tlast==0)
-    begin
-        packet_bytes[beat_counter*64+:64] <= s_axis_tdata;
-        packet_tuser[beat_counter*RX_USER_WIDTH +: RX_USER_WIDTH] <= s_axis_tuser; // added
-        beat_counter <= beat_counter+1;
+        phase <= PHASE_IDLE;
         
-        m_axis_tdata<=64'b0;
-        m_axis_tkeep<=8'b0;
-        m_axis_tvalid<=0;
-        m_axis_tuser<=0;       // changed
-        m_axis_tlast<=0;
-    
-    end
-    // packet has been stored
-    else if (s_axis_tlast && start_packet_accept == 1 && s_axis_tvalid)
-    begin
-        packet_bytes[beat_counter*64+:64]<= s_axis_tdata;
-        packet_tuser[beat_counter*RX_USER_WIDTH +: RX_USER_WIDTH] <= s_axis_tuser; // added
-        valid_packet_buffer<=1;
-        write_beat_count<=0;
-        last_tkeep<=s_axis_tkeep;
-        
-        // call packet analysis module here
-        start_analysis <=1;
-
-        
-        m_axis_tdata<=64'b0;
-        m_axis_tkeep<=8'b0;
-        m_axis_tvalid<=0;
-        m_axis_tuser<=0;       // changed
-        m_axis_tlast<=0;
+        packet_tuser<=0;               // added
+        beat_counter<=0;
         start_packet_accept<=0;
-    end
-    
-    else if (start_analysis == 1)
-    begin
         start_analysis <= 0;
         valid_packet_buffer<=0;
-        m_axis_tuser_1<= packet_tuser;
+        write_beat_count<=0;
+        last_tkeep<=0;
+        parent_r_add <= 0;
+        parent_w_add <= 0;
+        parent_data_in <= 0;
+        parent_write_en <= 0;
+        m_start_packet<=0;
+        m_axis_tdata<=0;
+        m_axis_tkeep<=0;
+        m_axis_tvalid<=0;
+        m_axis_tlast<=0;
+        m_axis_tuser<=0;
+        send_phase<=0;
     end
+    else begin
+     
+        // lock valid packets in a reg and only accept when send_phase = 0
+        parent_write_en <= 0;
+        if (send_phase == 0)
+        begin
+            if (valid_packet == 1 && drop_packet == 0)
+            begin
+                phase<=PHASE_SEND;
+                send_phase_warmup<=1;
+                parent_r_add <= 0;
+                write_beat_count <= 0;
+            end
+            else if (valid_packet == 1 && drop_packet == 1)
+            begin
+                phase <= PHASE_IDLE;
+                valid_packet_buffer <= 0;
+                beat_counter <= 0;
+                start_packet_accept <= 0;
+                send_phase <= 0;
+            end
+        end
+        
+        // Starting to store packets
+        // add additional condition if phase  == PHASE_IDLE
+        if (s_start_packet!=0 && valid_packet_buffer==0 && phase == PHASE_IDLE)
+        begin
+            m_axis_tdata<=64'b0;
+            m_axis_tkeep<=8'b0;
+            m_axis_tvalid<=0;
+            m_axis_tuser<=0;           // changed: do not mirror live input during idle
+            m_axis_tlast<=0;
+            
+            start_packet_accept <= 1;
+            if (s_axis_tvalid)
+            begin
+                phase <= PHASE_CAPTURE; 
+                parent_write_en <=1;
+                parent_data_in <= s_axis_tdata;
+                parent_w_add <= 0;
+                packet_tuser[0 +: RX_USER_WIDTH] <= s_axis_tuser;   // added
+                beat_counter<=1;
+            end
+        end
+        // proceeding to store packet in the buffer
+        else if (start_packet_accept == 1 && s_axis_tvalid && s_axis_tlast==0)
+        begin
+            
+            packet_tuser[beat_counter*RX_USER_WIDTH +: RX_USER_WIDTH] <= s_axis_tuser; // added
+            beat_counter <= beat_counter+1;
+            parent_write_en <=1;
+            parent_data_in <= s_axis_tdata;
+            parent_w_add <= beat_counter;
+            m_axis_tdata<=64'b0;
+            m_axis_tkeep<=8'b0;
+            m_axis_tvalid<=0;
+            m_axis_tuser<=0;       // changed
+            m_axis_tlast<=0;
+        
+        end
+        // packet has been stored
+        else if (s_axis_tlast && start_packet_accept == 1 && s_axis_tvalid)
+        begin
+            packet_tuser[beat_counter*RX_USER_WIDTH +: RX_USER_WIDTH] <= s_axis_tuser; // added
+            valid_packet_buffer<=1;
+            write_beat_count<=0;
+            last_tkeep<=s_axis_tkeep;
+            
+            parent_write_en <= 1;
+            parent_data_in <= s_axis_tdata;
+            parent_w_add  <= beat_counter;
+            
+            // call packet analysis module here
+            start_analysis <=1;
     
-    else if (send_phase == 1)
-    begin
-        // stop analysis
-        start_analysis <=0;
+            
+            m_axis_tdata<=64'b0;
+            m_axis_tkeep<=8'b0;
+            m_axis_tvalid<=0;
+            m_axis_tuser<=0;       // changed
+            m_axis_tlast<=0;
+            start_packet_accept<=0;
+        end
         
-        if (write_beat_count ==0)
-            m_start_packet<=2'b01;
-        else
-            m_start_packet<=0;
+        else if (start_analysis == 1)
+        begin
+            start_analysis <= 0;
+            //valid_packet_buffer<=0;
+            phase <= PHASE_ANALYZE;
+           
+           
+        end
+        else if (send_phase_warmup == 1)
+        begin
+            send_phase <=1;
+            send_phase_warmup<=0;
+            parent_r_add <= write_beat_count+1;
+            write_beat_count<=write_beat_count+1;
+            
+        end
+        else if (send_phase == 1)
+        begin
+            phase <= PHASE_SEND;
+            // stop analysis
+            start_analysis <=0;
+            
+            if (write_beat_count ==0)
+                m_start_packet<=2'b01;
+            else
+                m_start_packet<=0;
+            
+            m_axis_tdata <= data_out;
+            parent_r_add <= write_beat_count+1;
+            m_axis_tuser <= packet_tuser[write_beat_count*RX_USER_WIDTH+:RX_USER_WIDTH];
+            
+            m_axis_tvalid<=1;
+            
+            // changed: replay stored tuser for this beat - we might have to test the behaviour when we set it to 0
+            //m_axis_tuser<=0;//packet_tuser[write_beat_count*RX_USER_WIDTH +: RX_USER_WIDTH];
+            
+            // we have to change write beat count
+            write_beat_count<=write_beat_count+1;
+            if (mod_beat_counter == write_beat_count)
+            begin
+                m_axis_tkeep<=8'hFF;
+                send_phase_shutdown<=1;
+                send_phase<=0;
+            end
+            else
+            begin
+                m_axis_tlast<=0;
+                m_axis_tkeep<= 8'hFF;
+            end
+            
+        end
         
-        m_axis_tdata<=send_packet[write_beat_count*64+:64];
-        m_axis_tuser <= m_axis_tuser_2[write_beat_count*RX_USER_WIDTH+:RX_USER_WIDTH];
-        
-        m_axis_tvalid<=1;
-        
-        // changed: replay stored tuser for this beat - we might have to test the behaviour when we set it to 0
-        //m_axis_tuser<=0;//packet_tuser[write_beat_count*RX_USER_WIDTH +: RX_USER_WIDTH];
-        
-        // we have to change write beat count
-        write_beat_count<=write_beat_count+1;
-        if (mod_beat_counter == write_beat_count)
+        else if (send_phase_shutdown==1)
         begin
             m_axis_tlast <= 1'b1;
             m_axis_tkeep<= mod_last_tkeep;
-            
+            valid_packet_buffer<=0;
             beat_counter<=0;
-            send_phase<=0;
+            send_phase_shutdown<=0;
+            m_axis_tdata <= data_out;
+            m_axis_tuser <= packet_tuser[write_beat_count*RX_USER_WIDTH+:RX_USER_WIDTH];
+            
+            
         end
-        else
+        else if (m_axis_tlast ==1)
         begin
+            phase <= PHASE_IDLE;
+            start_packet_accept <= 0;
+            m_start_packet <= 0;
             m_axis_tlast<=0;
-            m_axis_tkeep<= 8'hFF;
+            m_axis_tvalid<=0;
+            m_axis_tdata<=0;
+            m_axis_tkeep<=0;
+            m_axis_tuser<=0;       // changed
         end
-        
     end
-    
-    
-    else if (m_axis_tlast ==1)
-    begin
-        m_axis_tlast<=0;
-        m_axis_tvalid<=0;
-        m_axis_tdata<=0;
-        m_axis_tkeep<=0;
-        m_axis_tuser<=0;       // changed
-    end
-end
-end
+ end
 
 /////////////////////////////////
 
