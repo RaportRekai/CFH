@@ -60,13 +60,20 @@ module analyse_stored_packet #(
     // word indices for BRAM (64-bit words)
     // -------------------------------------------------------------------------
 
-    localparam [7:0] WORD_IP_HDR0 = (IP_LEN / 64);         // word containing IP length and protocol
-    localparam [7:0] WORD_IP_CKS  = (IP_CKS / 64);         // word containing IP checksum
-    localparam [7:0] WORD_UDP_HDR = (TCP_DEST_PORT / 64);  // word containing UDP dst port and UDP length
-    localparam [7:0] WORD_UDP_CKS = (UDP_CKS / 64);        // word containing UDP checksum
+    localparam [7:0] WORD_IP_HDR0   = (IP_LEN / 64);         // word containing IP length and protocol = word 2
+    localparam [7:0] WORD_IP_CKS    = (IP_CKS / 64);         // word containing IP checksum = word 3
+    localparam [7:0] WORD_UDP_HDR   = (TCP_DEST_PORT / 64);  // word containing UDP dst port and UDP length = word 4
+    localparam [7:0] WORD_UDP_CKS   = (UDP_CKS / 64);        // word containing UDP checksum = word 5
+    localparam [7:0] WORD_UDP_PAY0  = 8'd5;                  // first UDP payload byte is also in word 5
+
+    // destination IP spans bytes 30..33
+    // bytes 30,31 are in word 3; bytes 32,33 are in word 4
+    localparam [7:0] WORD_IP_DST_HI = 8'd3;
+    localparam [7:0] WORD_IP_DST_LO = 8'd4;
 
     // -------------------------------------------------------------------------
     // checksum precompute
+    // kept only so structure stays intact; not used in this experiment
     // -------------------------------------------------------------------------
 
     localparam [15:0] OLD_UDP_DST_PORT = 16'd4791;
@@ -116,7 +123,7 @@ module analyse_stored_packet #(
 
     localparam [15:0] PRECOMP_UDP_DELTA_CONST =
         add1c16(PRECOMP_UDP_DELTA, 16'd14);
-        
+
     localparam [4:0]
         IDLE                    = 5'd0,
 
@@ -145,9 +152,35 @@ module analyse_stored_packet #(
         DROP_PKT                = 5'd16;
 
     reg [4:0] state;
-    
 
-// -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // reverse bits helpers
+    // kept only because they existed in the module; not used for this experiment
+    // -------------------------------------------------------------------------
+
+    function automatic [15:0] reverse_bits_16;
+        input [15:0] x;
+    begin
+        reverse_bits_16 = {
+            x[0],  x[1],  x[2],  x[3],
+            x[4],  x[5],  x[6],  x[7],
+            x[8],  x[9],  x[10], x[11],
+            x[12], x[13], x[14], x[15]
+        };
+    end
+    endfunction
+
+    function automatic [7:0] reverse_bits_8;
+        input [7:0] x;
+    begin
+        reverse_bits_8 = {
+            x[0], x[1], x[2], x[3],
+            x[4], x[5], x[6], x[7]
+        };
+    end
+    endfunction
+
+    // -------------------------------------------------------------------------
     // local registers
     // -------------------------------------------------------------------------
 
@@ -155,6 +188,10 @@ module analyse_stored_packet #(
     reg [15:0] old_bytes;
     reg [15:0] new_bytes;
     reg cfh_candidate;
+
+    // extracted destination IP in normal byte order:
+    // [31:24]=byte30, [23:16]=byte31, [15:8]=byte32, [7:0]=byte33
+    reg [31:0] dst_ip_bytes;
 
     initial begin
         state            <= IDLE;
@@ -178,11 +215,12 @@ module analyse_stored_packet #(
 
         old_bytes        <= 16'd0;
         new_bytes        <= 16'd0;
-        
-        cfh_candidate <= 1'b0;
+
+        cfh_candidate    <= 1'b0;
+        dst_ip_bytes     <= 32'd0;
     end
-    
-   always @(posedge clk) begin
+
+    always @(posedge clk) begin
         if (rst) begin
             state            <= IDLE;
             score            <= 4'd6;
@@ -205,174 +243,166 @@ module analyse_stored_packet #(
 
             old_bytes        <= 16'd0;
             new_bytes        <= 16'd0;
-            
-            cfh_candidate <= 1'b0;
+
+            cfh_candidate    <= 1'b0;
+            dst_ip_bytes     <= 32'd0;
         end
         else begin
             // defaults each cycle
-            write_en        <= 1'b0;
-            valid           <= 1'b0;
-            drop_packet     <= 1'b0;
-            need_cfh_header <= 1'b0;
+            write_en         <= 1'b0;
+            valid            <= 1'b0;
+            drop_packet      <= 1'b0;
+            need_cfh_header  <= 1'b0;
             mod_beat_counter <= beat_counter;
-            mod_last_tkeep  <=  last_tkeep;
+            mod_last_tkeep   <= last_tkeep;
 
-            case (state)  
-                // what is IDLE supposed to do?
-                 
+            case (state)
+
                 IDLE: begin
-                    if (start_analysis == 1)
-                    begin
-                        state<=CHECK_PROT_NO_WAIT;
-                        r_add<=WORD_IP_HDR0;
+                    if (start_analysis == 1) begin
+                        state         <= CHECK_PROT_NO_WAIT;
+                        r_add         <= WORD_IP_HDR0;
                         cfh_candidate <= 1'b0;
+                        dst_ip_bytes  <= 32'd0;
                     end
                 end
-                
+
                 // -------------------------------------------------------------
                 // CHECK_PROT_NO
                 // protocol byte is at bit offset 56 in word 2
                 // -------------------------------------------------------------
-                
                 CHECK_PROT_NO_WAIT: begin
                     state <= CHECK_PROT_NO;
                 end
+
                 CHECK_PROT_NO: begin
                     if (data_out[56 +: 8] == 8'd17) begin
-                        // UDP packet, now check destination port
-                        r_add <= WORD_UDP_HDR;
+                        // UDP packet: first read word 3 to get bytes 30 and 31
+                        r_add <= WORD_IP_DST_HI;
                         state <= CHECK_DEST_PORT_WAIT;
                     end
                     else begin
                         state <= DONE;
                     end
                 end
-                
+
                 // -------------------------------------------------------------
                 // CHECK_DEST_PORT
-                // UDP destination port is bits [47:32] of word 4
+                // repurposed: extract destination IP bytes 30 and 31 from word 3
+                // word 3 contains bytes 24..31
+                // byte30 = data_out[48 +: 8]
+                // byte31 = data_out[56 +: 8]
                 // -------------------------------------------------------------
                 CHECK_DEST_PORT_WAIT: begin
                     state <= CHECK_DEST_PORT;
                 end
 
                 CHECK_DEST_PORT: begin
-                    if ((data_out[32 +: 16] == OLD_UDP_DST_PORT) && (score > THRESH)) begin
-                        // This packet needs CFH insertion later in parent.
-                        // First modify existing fields in BRAM
-                        r_add <= WORD_IP_HDR0;
-                        cfh_candidate <= 1'b1;
-                        state <= EDIT_IP_LEN_WAIT;
-                    end
-                    else begin
-                        cfh_candidate <= 1'b0;
-                        state <= DONE;
-                    end 
+                    dst_ip_bytes[31:24] <= data_out[48 +: 8];
+                    dst_ip_bytes[23:16] <= data_out[56 +: 8];
+
+                    // now read word 4 to get bytes 32 and 33
+                    r_add <= WORD_IP_DST_LO;
+                    state <= EDIT_IP_LEN_WAIT;
                 end
+
                 // -------------------------------------------------------------
                 // EDIT_IP_LEN
-                // word 2, preserve all bits except [15:0]
+                // repurposed: finish extracting destination IP bytes 32 and 33
+                // word 4 contains bytes 32..39
+                // byte32 = data_out[0 +: 8]
+                // byte33 = data_out[8 +: 8]
                 // -------------------------------------------------------------
                 EDIT_IP_LEN_WAIT: begin
                     state <= EDIT_IP_LEN;
                 end
 
                 EDIT_IP_LEN: begin
-                    data_in        <= data_out;
-                    data_in[0 +:16] <= data_out[0 +:16] + EXTRA_LEN;
+                    dst_ip_bytes[15:8] <= data_out[0 +: 8];
+                    dst_ip_bytes[7:0]  <= data_out[8 +: 8];
 
-                    w_add          <= WORD_IP_HDR0;
-                    write_en       <= 1'b1;
-
-                    r_add          <= WORD_UDP_HDR;
-                    state          <= EDIT_UDP_DEST_PORT_WAIT;
+                    // now read the payload word so we can overwrite bytes 42..45
+                    r_add <= WORD_UDP_PAY0;
+                    state <= EDIT_UDP_DEST_PORT_WAIT;
                 end
 
                 // -------------------------------------------------------------
                 // EDIT_UDP_DEST_PORT
-                // word 4, preserve all bits except [47:32]
+                // repurposed: write destination IP bytes into payload bytes 42..45
+                //
+                // word 5 contains bytes 40..47
+                // byte42 = data_out[23:16]
+                // byte43 = data_out[31:24]
+                // byte44 = data_out[39:32]
+                // byte45 = data_out[47:40]
+                //
+                // Per your request:
+                // - extract without reversing
+                // - write without reversing
                 // -------------------------------------------------------------
                 EDIT_UDP_DEST_PORT_WAIT: begin
                     state <= EDIT_UDP_DEST_PORT;
                 end
 
                 EDIT_UDP_DEST_PORT: begin
-                    data_in         <= data_out;
-                    data_in[32 +:16] <= NEW_UDP_DST_PORT;
+                    data_in <= {
+                        data_out[63:48],      // bytes 46,47 unchanged
+                        dst_ip_bytes[7:0],    // byte45
+                        dst_ip_bytes[15:8],   // byte44
+                        dst_ip_bytes[23:16],  // byte43
+                        dst_ip_bytes[31:24],  // byte42
+                        data_out[15:0]        // bytes 40,41 unchanged
+                    };
 
-                    w_add           <= WORD_UDP_HDR;
-                    write_en        <= 1'b1;
+                    w_add    <= WORD_UDP_PAY0;
+                    write_en <= 1'b1;
 
-                    // reread same word for UDP length update
-                    r_add           <= WORD_UDP_HDR;
-                    state           <= EDIT_UDP_LEN_WAIT;
+                    // keep remaining states in the FSM, but stale
+                    state <= EDIT_UDP_LEN_WAIT;
                 end
 
                 // -------------------------------------------------------------
                 // EDIT_UDP_LEN
-                // word 4, preserve all bits except [63:48]
+                // stale in this experiment
                 // -------------------------------------------------------------
                 EDIT_UDP_LEN_WAIT: begin
                     state <= EDIT_UDP_LEN;
                 end
 
                 EDIT_UDP_LEN: begin
-                    data_in         <= data_out;
-                    data_in[48 +:16] <= data_out[48 +:16] + EXTRA_LEN;
-
-                    w_add           <= WORD_UDP_HDR;
-                    write_en        <= 1'b1;
-
-                    r_add           <= WORD_IP_CKS;
-                    state           <= EDIT_IP_CKS_WAIT;
+                    state <= EDIT_IP_CKS_WAIT;
                 end
 
                 // -------------------------------------------------------------
                 // EDIT_IP_CKS
-                // word 3, preserve all bits except [15:0]
+                // stale in this experiment
                 // -------------------------------------------------------------
                 EDIT_IP_CKS_WAIT: begin
                     state <= EDIT_IP_CKS;
                 end
 
                 EDIT_IP_CKS: begin
-                    data_in        <= data_out;
-                    data_in[0 +:16] <= ~add1c16(~data_out[0 +:16], 16'd14);
-
-                    w_add          <= WORD_IP_CKS;
-                    write_en       <= 1'b1;
-
-                    r_add          <= WORD_UDP_CKS;
-                    state          <= EDIT_UDP_CKS_WAIT;
+                    state <= EDIT_UDP_CKS_WAIT;
                 end
 
                 // -------------------------------------------------------------
                 // EDIT_UDP_CKS
-                // word 5, preserve all bits except [15:0]
+                // stale in this experiment
                 // -------------------------------------------------------------
                 EDIT_UDP_CKS_WAIT: begin
                     state <= EDIT_UDP_CKS;
                 end
 
                 EDIT_UDP_CKS: begin
-                    data_in        <= data_out;
-                    data_in[0 +:16] <= ~add1c16(~data_out[0 +:16], PRECOMP_UDP_DELTA_CONST);
-
-                    w_add          <= WORD_UDP_CKS;
-                    write_en       <= 1'b1;
-
-                    state          <= DONE;
+                    state <= DONE;
                 end
+
                 // -------------------------------------------------------------
                 // DONE
-                // tell parent this packet needs CFH insertion
                 // -------------------------------------------------------------
                 DONE: begin
                     valid <= 1'b1;
-
-                    // only assert if packet matched the criteria
-                    need_cfh_header<=cfh_candidate;
-
+                    need_cfh_header <= cfh_candidate;
                     state <= IDLE;
                 end
 
@@ -393,11 +423,3 @@ module analyse_stored_packet #(
     end
 
 endmodule
-            
-            
-            
-            
-            
-            
-            
-            
