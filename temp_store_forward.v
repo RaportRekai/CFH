@@ -52,14 +52,11 @@ reg [MAX_BEATS*RX_USER_WIDTH-1:0] packet_tuser;
 
 reg start_packet_accept;
 reg [7:0]beat_counter;
-reg [7:0]mod_beat_counter;
-wire [7:0]changed_beat_counter;
+wire [7:0]mod_beat_counter;
 reg [7:0]write_beat_count;
 reg valid_packet_buffer;
 reg [7:0]last_tkeep;
-reg [7:0]mod_last_tkeep;
-wire [7:0]changed_last_tkeep;
-
+wire [7:0]mod_last_tkeep;
 
 //packet analysis control registers
 reg start_analysis;
@@ -69,8 +66,6 @@ wire valid_packet;
 reg send_phase;
 reg send_phase_warmup;
 reg send_phase_shutdown;
-reg send_phase_shutdown_2;
-
 /////////////////////////////////
 localparam PHASE_IDLE    = 2'd0,
            PHASE_CAPTURE = 2'd1,
@@ -111,13 +106,13 @@ assign bram_write_en = (phase == PHASE_ANALYZE) ? ana_write_en : parent_write_en
 
 
 
-localparam [7:0]  CFH_MSG     = 8'd4;
-localparam [7:0]  TTL         = 8'd4;
-localparam [31:0] LB_ID       = 32'd4;
-localparam [31:0] RDMA_CONFIG = 32'd4;
-localparam [31:0] HOST_ID     = 32'd4;
-localparam [15:0] EXTRA_LEN   = 16'd14;   // bytes to be inserted later by parent
-localparam [3:0]  THRESH      = 4'd5;
+localparam [7:0]  CFH_MSG     = 8'd4,
+localparam [7:0]  TTL         = 8'd4,
+localparam [31:0] LB_ID       = 32'd4,
+localparam [31:0] RDMA_CONFIG = 32'd4,
+localparam [31:0] HOST_ID     = 32'd4,
+localparam [15:0] EXTRA_LEN   = 16'd14,   // bytes to be inserted later by parent
+localparam [3:0]  THRESH      = 4'd5
 
 
 localparam [7:0] CFH_B0 = LB_ID[7:0];
@@ -152,9 +147,13 @@ wire need_cfh_header;
 reg write_cfh;
 reg cfh_header_stage_1;
 reg cfh_header_stage_2;
+reg send_phase_shutdown_2;
 reg [63:0] saved_data_out;
 reg [63-BYTE_START*8:0] for_next_clk;
-reg send_phase_shutdown_3;
+reg [15:0] orig_total_bytes;
+reg [15:0] new_total_bytes;
+reg [3:0]  orig_last_valid_bytes;
+reg [3:0]  new_last_valid_bytes;
 
 
 analyse_stored_packet analyse_packet_inst (
@@ -174,8 +173,8 @@ analyse_stored_packet analyse_packet_inst (
     .drop_packet(drop_packet),
     .valid(valid_packet),
     .need_cfh_header(need_cfh_header),
-    .mod_beat_counter(changed_beat_counter),
-    .mod_last_tkeep(changed_last_tkeep)
+    .mod_beat_counter(mod_beat_counter),
+    .mod_last_tkeep(mod_last_tkeep)
 );
 
 
@@ -217,11 +216,6 @@ always @(posedge clk) begin
         cfh_header_stage_2 <= 0;
         saved_data_out     <= 0;
         for_next_clk       <= 0;
-        send_phase_warmup     <= 0;
-        send_phase_shutdown   <= 0;
-        send_phase_shutdown_2 <= 0;
-        write_cfh             <= 0;
-        send_phase_shutdown_3 <= 0;
     end
     else begin
      
@@ -233,8 +227,6 @@ always @(posedge clk) begin
             begin
                 phase <= PHASE_SEND;
                 write_cfh <= need_cfh_header;
-                mod_beat_counter <= changed_beat_counter;
-                mod_last_tkeep <= changed_last_tkeep;
                 cfh_header_stage_1 <= 0;
                 cfh_header_stage_2 <= 0;
                 saved_data_out     <= 0;
@@ -242,9 +234,6 @@ always @(posedge clk) begin
                 send_phase_warmup<=1;
                 parent_r_add <= 0;
                 write_beat_count <= 0;
-                send_phase_shutdown_3 <= 0;
-                send_phase_shutdown   <= 0;
-                send_phase_shutdown_2 <= 0;
             end
             else if (valid_packet == 1 && drop_packet == 1)
             begin
@@ -253,9 +242,6 @@ always @(posedge clk) begin
                 beat_counter <= 0;
                 start_packet_accept <= 0;
                 send_phase <= 0;
-                send_phase_shutdown_3 <= 0;
-                send_phase_shutdown   <= 0;
-                send_phase_shutdown_2 <= 0;
             end
         end
         
@@ -419,64 +405,46 @@ always @(posedge clk) begin
         // this cycle is the one before the final tlast cycle
         if (mod_beat_counter == write_beat_count)
         begin
-            m_axis_tkeep <= 8'hff;
-            if (write_cfh == 1'b1 && cfh_header_stage_2 == 1'b1)
-            begin
-                // CFH shifted stream still has pipeline data to flush
-                send_phase_shutdown   <= 1'b1;
-                send_phase            <= 1'b0;
-            end
-            else
-            begin
-                // normal non-CFH case
-                m_axis_tvalid <= 1'b1;
-                m_axis_tlast  <= 1'b0;
-                send_phase_shutdown   <= 1'b1;
-                send_phase            <= 1'b0;
-            end
+            m_axis_tkeep <= 8'hFF;
+            send_phase_shutdown <= 1'b1;
+            send_phase <= 1'b0;
         end
     end
 
     else if (send_phase_shutdown == 1)
     begin
-        
-        m_axis_tlast <= 1'b1;
-        m_axis_tvalid <= 1;
+        m_axis_tlast  <= 1'b1;
+        m_axis_tvalid <= 1'b1;
+
+        // mod_last_tkeep must already correspond to the FINAL packet size
+        m_axis_tkeep <= mod_last_tkeep;
+
+        // final beat must also come from shifted path when CFH insertion is active
+        if ((write_cfh == 1'b1) && (cfh_header_stage_2 == 1'b1))
+        begin
+            m_axis_tdata <= {saved_data_out[0 +: BYTE_START*8], for_next_clk};
+
+            // one reasonable choice: keep tuser aligned to your output-side indexing
+            m_axis_tuser <= packet_tuser[(write_beat_count-1)*RX_USER_WIDTH +: RX_USER_WIDTH];
+        end
+        else
+        begin
+            m_axis_tdata <= data_out;
+            m_axis_tuser <= packet_tuser[(write_beat_count-1)*RX_USER_WIDTH +: RX_USER_WIDTH];
+        end
+
+        valid_packet_buffer <= 0;
+        beat_counter <= 0;
+        send_phase_shutdown <= 0;
+
+        // clear CFH pipeline state after final beat
         cfh_header_stage_1 <= 0;
         cfh_header_stage_2 <= 0;
         saved_data_out     <= 0;
         for_next_clk       <= 0;
-        write_cfh <= 0;
-        phase <= PHASE_IDLE;
+    end      
+            
         
-        if (write_cfh == 1'b1 && cfh_header_stage_2 == 1'b1)
-        begin
-            // flush beat 1: emit buffered source beat + previous carry
-            m_axis_tdata <= {saved_data_out[0 +: BYTE_START*8], for_next_clk};
-            m_axis_tkeep <= mod_last_tkeep;
-            m_axis_tuser <= packet_tuser[(write_beat_count-2)*RX_USER_WIDTH +: RX_USER_WIDTH];
-            send_phase_shutdown   <= 1'b0;
-            valid_packet_buffer<=0;
-            beat_counter<=0;
-           
-        end
-        else
-        begin
-            // original non-CFH shutdown behavior
-            
-            m_axis_tkeep <= mod_last_tkeep;
-            m_axis_tdata <= data_out;
-            m_axis_tuser <= packet_tuser[(write_beat_count-1)*RX_USER_WIDTH +: RX_USER_WIDTH];
-            
-            valid_packet_buffer <= 0;
-            beat_counter <= 0;
-            send_phase_shutdown <= 0;
-            
-            
-        end
-    end
-          
-
         else if (m_axis_tlast ==1)
         begin
             phase <= PHASE_IDLE;

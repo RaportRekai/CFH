@@ -402,59 +402,25 @@ endfunction
                 // tell parent this packet needs CFH insertion
                 // -------------------------------------------------------------
                 DONE: begin
-    valid <= 1'b1;
-    need_cfh_header <= cfh_candidate;
+                    valid <= 1'b1;
+                    need_cfh_header <= cfh_candidate;
 
-    if (cfh_candidate) begin
-        // CFH insertion adds 14 bytes = 8 + 6
-        // Explicit remap of last beat occupancy and final beat index
+                    orig_last_valid_bytes = count_keep8(last_tkeep);
+                    orig_total_bytes      = beat_counter * 8 + orig_last_valid_bytes;
 
-        if (last_tkeep == 8'b00000001) begin
-            mod_last_tkeep   <= 8'b01111111;   // 1 -> 7
-            mod_beat_counter <= beat_counter + 1;
-        end
-        else if (last_tkeep == 8'b00000011) begin
-            mod_last_tkeep   <= 8'b11111111;   // 2 -> 8
-            mod_beat_counter <= beat_counter + 1;
-        end
-        else if (last_tkeep == 8'b00000111) begin
-            mod_last_tkeep   <= 8'b00000001;   // 3 -> 1
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b00001111) begin
-            mod_last_tkeep   <= 8'b00000011;   // 4 -> 2
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b00011111) begin
-            mod_last_tkeep   <= 8'b00000111;   // 5 -> 3
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b00111111) begin
-            mod_last_tkeep   <= 8'b00001111;   // 6 -> 4
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b01111111) begin
-            mod_last_tkeep   <= 8'b00011111;   // 7 -> 5
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b11111111) begin
-            mod_last_tkeep   <= 8'b00111111;   // 8 -> 6
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else begin
-            // fallback if keep is invalid / non-contiguous
-            mod_last_tkeep   <= last_tkeep;
-            mod_beat_counter <= beat_counter;
-        end
-    end
-    else begin
-        // no CFH insertion -> unchanged packet size
-        mod_beat_counter <= beat_counter;
-        mod_last_tkeep   <= last_tkeep;
-    end
+                    if (cfh_candidate) begin
+                        new_total_bytes = orig_total_bytes + EXTRA_LEN;
+                    end
+                    else begin
+                        new_total_bytes = orig_total_bytes;
+                    end
 
-    state <= IDLE;
-end
+                    mod_beat_counter   <= (new_total_bytes - 1) / 8;
+                    new_last_valid_bytes = new_total_bytes % 8;
+                    mod_last_tkeep     <= keep_from_count(new_last_valid_bytes);
+
+                    state <= IDLE;
+                end
 
                 // -------------------------------------------------------------
                 // DROP

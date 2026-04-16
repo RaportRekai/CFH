@@ -29,9 +29,11 @@ input [63:0] data_in,
 input [7:0] w_add,
 input write_en
     );
-    
+    integer i;
     reg [63:0] packet_mem [0:189];
     initial
+        for (i = 0; i < 190; i = i + 1)
+        packet_mem[i] = 64'd0;
     begin
         
     end
