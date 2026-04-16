@@ -420,6 +420,8 @@ always @(posedge clk) begin
         if (mod_beat_counter == write_beat_count)
         begin
             m_axis_tkeep <= 8'hff;
+            m_axis_tvalid <= 1'b1;
+            m_axis_tlast  <= 1'b0;
             if (write_cfh == 1'b1 && cfh_header_stage_2 == 1'b1)
             begin
                 // CFH shifted stream still has pipeline data to flush
@@ -429,8 +431,7 @@ always @(posedge clk) begin
             else
             begin
                 // normal non-CFH case
-                m_axis_tvalid <= 1'b1;
-                m_axis_tlast  <= 1'b0;
+                
                 send_phase_shutdown   <= 1'b1;
                 send_phase            <= 1'b0;
             end

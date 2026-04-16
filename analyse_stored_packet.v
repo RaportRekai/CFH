@@ -12,10 +12,10 @@ module analyse_stored_packet #(
     parameter STRIP_DATA_C      = 472,   // 32 bit
 
     // Packet header reform fields bit index
-    parameter UDP_LEN           = 304,   // 16 bits
-    parameter IP_LEN            = 128,   // 16 bits
-    parameter UDP_CKS           = 320,   // 16 bits
-    parameter IP_CKS            = 192,   // 16 bits
+    parameter UDP_LEN           = 304,   // 16 bits 4
+    parameter IP_LEN            = 128,   // 16 bits 2
+    parameter UDP_CKS           = 320,   // 16 bits 5
+    parameter IP_CKS            = 192,   // 16 bits 3
 
     // Data for CFH decision / checksum delta
     parameter [7:0]  CFH_MSG     = 8'd4,
@@ -63,10 +63,10 @@ module analyse_stored_packet #(
     // word indices for BRAM (64-bit words)
     // -------------------------------------------------------------------------
 
-    localparam [7:0] WORD_IP_HDR0 = (IP_LEN / 64);         // word containing IP length and protocol
-    localparam [7:0] WORD_IP_CKS  = (IP_CKS / 64);         // word containing IP checksum
-    localparam [7:0] WORD_UDP_HDR = (TCP_DEST_PORT / 64);  // word containing UDP dst port and UDP length
-    localparam [7:0] WORD_UDP_CKS = (UDP_CKS / 64);        // word containing UDP checksum
+    localparam [7:0] WORD_IP_HDR0 = (IP_LEN / 64);         // word containing IP length and protocol 2
+    localparam [7:0] WORD_IP_CKS  = (IP_CKS / 64);         // word containing IP checksum 3
+    localparam [7:0] WORD_UDP_HDR = (TCP_DEST_PORT / 64);  // word containing UDP dst port and UDP length 4
+    localparam [7:0] WORD_UDP_CKS = (UDP_CKS / 64);        // word containing UDP checksum 5
 
     // -------------------------------------------------------------------------
     // checksum precompute
@@ -163,39 +163,6 @@ module analyse_stored_packet #(
     reg [3:0]  orig_last_valid_bytes;
     reg [3:0]  new_last_valid_bytes;
 
-    function automatic [3:0] count_keep8;
-    input [7:0] keep;
-    begin
-        case (keep)
-            8'b00000001: count_keep8 = 4'd1;
-            8'b00000011: count_keep8 = 4'd2;
-            8'b00000111: count_keep8 = 4'd3;
-            8'b00001111: count_keep8 = 4'd4;
-            8'b00011111: count_keep8 = 4'd5;
-            8'b00111111: count_keep8 = 4'd6;
-            8'b01111111: count_keep8 = 4'd7;
-            8'b11111111: count_keep8 = 4'd8;
-            default:     count_keep8 = 4'd0;
-        endcase
-    end
-endfunction
-
-function automatic [7:0] keep_from_count;
-    input [3:0] n;
-    begin
-        case (n)
-            4'd0: keep_from_count = 8'hFF;
-            4'd1: keep_from_count = 8'b00000001;
-            4'd2: keep_from_count = 8'b00000011;
-            4'd3: keep_from_count = 8'b00000111;
-            4'd4: keep_from_count = 8'b00001111;
-            4'd5: keep_from_count = 8'b00011111;
-            4'd6: keep_from_count = 8'b00111111;
-            4'd7: keep_from_count = 8'b01111111;
-            default: keep_from_count = 8'h00;
-        endcase
-    end
-endfunction
 
     initial begin
         state            <= IDLE;
@@ -366,7 +333,7 @@ endfunction
                 EDIT_IP_CKS: begin
 
                    temp_data = ~add1c16(~{data_out[0+:8],data_out[8+:8]}, 16'd14);
-                   data_in <= {data_in[63:16],temp_data[0+:8],temp_data[8+:8]};
+                   data_in <= {data_out[63:16],temp_data[0+:8],temp_data[8+:8]};
                       
 
                    w_add          <= WORD_IP_CKS;
