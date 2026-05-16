@@ -298,7 +298,7 @@ module analyse_stored_packet #(
                     end
                     else if(temp_data == OLD_UDP_DST_PORT && experiment_threshold > score_cap_deg) begin
                         cfh_candidate <= 1'b0;
-                        state <= DROP_PKT;
+                        state <= DONE;
                     end
                     else if(temp_data == TELE_DST_PORT)
                     begin
