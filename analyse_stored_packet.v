@@ -5,6 +5,7 @@ module analyse_stored_packet #(
     parameter IPV4_PROT_NO_BYTE = 184,   // 8 bits
     parameter TCP_DEST_PORT     = 288,   // actually UDP dest port in your path, 16 bits
     parameter IP_CHECK          = 96,
+    
 
     // Packet scraping fields bit index
     parameter STRIP_DATA_A      = 432,   // 8 bit
@@ -23,8 +24,8 @@ module analyse_stored_packet #(
     parameter [31:0] LB_ID       = 32'd4,
     parameter [31:0] RDMA_CONFIG = 32'd4,
     parameter [31:0] HOST_ID     = 32'd4,
-    parameter [15:0] EXTRA_LEN   = 16'd14,   // bytes to be inserted later by parent
-    parameter [3:0]  THRESH      = 4'd5
+    parameter [15:0] EXTRA_LEN   = 16'd14  // bytes to be inserted later by parent
+    
 )(
     input  wire        clk,
     input  wire        rst,
@@ -74,6 +75,8 @@ module analyse_stored_packet #(
 
     localparam [15:0] OLD_UDP_DST_PORT = 16'd4791;
     localparam [15:0] NEW_UDP_DST_PORT = 16'd49112;
+    
+    localparam [15:0] TELE_DST_PORT = 16'd8888;
 
     localparam [15:0] CFH_W0 = LB_ID[31:16];
     localparam [15:0] CFH_W1 = LB_ID[15:0];
@@ -145,7 +148,11 @@ module analyse_stored_packet #(
         EDIT_UDP_CKS_WAIT       = 5'd14,
 
         DONE                    = 5'd15,
-        DROP_PKT                = 5'd16;
+        DROP_PKT                = 5'd16,
+        
+        TELE_0_READ_WAIT        = 5'd17,
+        TELE_1_READ_WAIT        = 5'd18,
+        TELE_2_READ_WAIT        = 5'd19;
 
     reg [4:0] state;
     reg [15:0] temp_data;
@@ -154,7 +161,7 @@ module analyse_stored_packet #(
     // local registers
     // -------------------------------------------------------------------------
 
-    reg [3:0]  score;
+    
     reg [15:0] old_bytes;
     reg [15:0] new_bytes;
     reg cfh_candidate;
@@ -163,10 +170,22 @@ module analyse_stored_packet #(
     reg [3:0]  orig_last_valid_bytes;
     reg [3:0]  new_last_valid_bytes;
 
+    //pvt telemetry
+    reg [4:0] cpu_info;
+    reg [4:0] total_in_q;
+    reg [4:0] max_cap;
+    reg [4:0] memory_usage;                    
+    reg [4:0] max_retry_in_count;   
+    reg [4:0] max_retry_out_count; 
+    reg [4:0] max_retry_per_req;
+    reg [7:0] experiment_threshold;
+    
+    reg [7:0] score_cap_deg;            
+    // score <= 
 
     initial begin
         state            <= IDLE;
-        score            <= 4'd6;
+        
 
         r_add            <= 8'd0;
         w_add            <= 8'd0;
@@ -188,12 +207,13 @@ module analyse_stored_packet #(
         new_bytes        <= 16'd0;
         
         cfh_candidate <= 1'b0;
+        experiment_threshold <= 8'b0;
     end
     
    always @(posedge clk) begin
         if (rst) begin
             state            <= IDLE;
-            score            <= 4'd6;
+           
 
             r_add            <= 8'd0;
             w_add            <= 8'd0;
@@ -234,6 +254,7 @@ module analyse_stored_packet #(
                         state<=CHECK_PROT_NO_WAIT;
                         r_add<=WORD_IP_HDR0;
                         cfh_candidate <= 1'b0;
+                        drop_packet<=0;
                     end
                 end
                 
@@ -267,12 +288,23 @@ module analyse_stored_packet #(
                 CHECK_DEST_PORT: begin
                     temp_data = {data_out[32+:8],data_out[40+:8]};
                     
-                    if ((temp_data == OLD_UDP_DST_PORT) && (score > THRESH)) begin
+                    if (temp_data == OLD_UDP_DST_PORT && experiment_threshold<=score_cap_deg) begin
                         // This packet needs CFH insertion later in parent.
                         // First modify existing fields in BRAM
                         r_add <= WORD_IP_HDR0;
                         cfh_candidate <= 1'b1;
                         state <= EDIT_IP_LEN_WAIT;
+                        
+                    end
+                    else if(temp_data == OLD_UDP_DST_PORT && experiment_threshold > score_cap_deg) begin
+                        cfh_candidate <= 1'b0;
+                        state <= DROP_PKT;
+                    end
+                    else if(temp_data == TELE_DST_PORT)
+                    begin
+                        state <=  TELE_0_READ_WAIT;
+                        r_add <=  5; //cpu info, total input_q,max capa
+                        cfh_candidate <= 1'b0;
                     end
                     else begin
                         cfh_candidate <= 1'b0;
@@ -283,6 +315,31 @@ module analyse_stored_packet #(
                 // EDIT_IP_LEN
                 // word 2, preserve all bits except [15:0]
                 // -------------------------------------------------------------
+                
+                TELE_0_READ_WAIT:begin
+                    state <= TELE_1_READ_WAIT;
+                    r_add <= 6;
+                end
+                TELE_1_READ_WAIT: begin
+                    // tele 0
+                    cpu_info <= (data_out[16+:7]>>2);
+                    total_in_q <= (data_out[24+:7]>>2);
+                    max_cap <= (data_out[56+:7]>>4);
+                    state <= TELE_2_READ_WAIT;
+                    
+                end
+                
+                TELE_2_READ_WAIT: begin
+                // tele 1
+                    memory_usage <= data_out[0+:7]>>4;
+                    max_retry_in_count <= data_out[8+:7]>>3;
+                    max_retry_out_count <= data_out[24+:7]>>4;
+                    max_retry_per_req <= data_out[40+:7]>>3;
+                    experiment_threshold <= data_out[48+:8];
+                    state <= DROP_PKT;
+                end
+                
+                
                 EDIT_IP_LEN_WAIT: begin
                     state <= EDIT_IP_LEN;
                 end
@@ -310,6 +367,7 @@ module analyse_stored_packet #(
                 EDIT_UDP_DEST_PORT: begin
                     temp_data = {data_out[48+:8],data_out[56+:8]} + EXTRA_LEN;               
 //                  data_in <= {temp_data[0+:8],temp_data[8+:8],data_out[47:0]};
+                    //data_in <= {temp_data[0+:8],temp_data[8+:8],score_cap_deg,NEW_UDP_DST_PORT[8+:8],data_out[31:0]};
                     data_in <= {temp_data[0+:8],temp_data[8+:8],NEW_UDP_DST_PORT[0+:8],NEW_UDP_DST_PORT[8+:8],data_out[31:0]};
 
                     w_add           <= WORD_UDP_HDR;
@@ -369,66 +427,66 @@ module analyse_stored_packet #(
                 // tell parent this packet needs CFH insertion
                 // -------------------------------------------------------------
                 DONE: begin
-    valid <= 1'b1;
-    need_cfh_header <= cfh_candidate;
-
-    if (cfh_candidate) begin
-        // CFH insertion adds 14 bytes = 8 + 6
-        // Explicit remap of last beat occupancy and final beat index
-
-        if (last_tkeep == 8'b00000001) begin
-            mod_last_tkeep   <= 8'b01111111;   // 1 -> 7
-            mod_beat_counter <= beat_counter + 1;
-        end
-        else if (last_tkeep == 8'b00000011) begin
-            mod_last_tkeep   <= 8'b11111111;   // 2 -> 8
-            mod_beat_counter <= beat_counter + 1;
-        end
-        else if (last_tkeep == 8'b00000111) begin
-            mod_last_tkeep   <= 8'b00000001;   // 3 -> 1
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b00001111) begin
-            mod_last_tkeep   <= 8'b00000011;   // 4 -> 2
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b00011111) begin
-            mod_last_tkeep   <= 8'b00000111;   // 5 -> 3
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b00111111) begin
-            mod_last_tkeep   <= 8'b00001111;   // 6 -> 4
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b01111111) begin
-            mod_last_tkeep   <= 8'b00011111;   // 7 -> 5
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else if (last_tkeep == 8'b11111111) begin
-            mod_last_tkeep   <= 8'b00111111;   // 8 -> 6
-            mod_beat_counter <= beat_counter + 2;
-        end
-        else begin
-            // fallback if keep is invalid / non-contiguous
-            mod_last_tkeep   <= last_tkeep;
-            mod_beat_counter <= beat_counter;
-        end
-    end
-    else begin
-        // no CFH insertion -> unchanged packet size
-        mod_beat_counter <= beat_counter;
-        mod_last_tkeep   <= last_tkeep;
-    end
-
-    state <= IDLE;
-end
-
+                    valid <= 1'b1;
+                    need_cfh_header <= cfh_candidate;
+                
+                    if (cfh_candidate) begin
+                        // CFH insertion adds 14 bytes = 8 + 6
+                        // Explicit remap of last beat occupancy and final beat index
+                
+                        if (last_tkeep == 8'b00000001) begin
+                            mod_last_tkeep   <= 8'b01111111;   // 1 -> 7
+                            mod_beat_counter <= beat_counter + 1;
+                        end
+                        else if (last_tkeep == 8'b00000011) begin
+                            mod_last_tkeep   <= 8'b11111111;   // 2 -> 8
+                            mod_beat_counter <= beat_counter + 1;
+                        end
+                        else if (last_tkeep == 8'b00000111) begin
+                            mod_last_tkeep   <= 8'b00000001;   // 3 -> 1
+                            mod_beat_counter <= beat_counter + 2;
+                        end
+                        else if (last_tkeep == 8'b00001111) begin
+                            mod_last_tkeep   <= 8'b00000011;   // 4 -> 2
+                            mod_beat_counter <= beat_counter + 2;
+                        end
+                        else if (last_tkeep == 8'b00011111) begin
+                            mod_last_tkeep   <= 8'b00000111;   // 5 -> 3
+                            mod_beat_counter <= beat_counter + 2;
+                        end
+                        else if (last_tkeep == 8'b00111111) begin
+                            mod_last_tkeep   <= 8'b00001111;   // 6 -> 4
+                            mod_beat_counter <= beat_counter + 2;
+                        end
+                        else if (last_tkeep == 8'b01111111) begin
+                            mod_last_tkeep   <= 8'b00011111;   // 7 -> 5
+                            mod_beat_counter <= beat_counter + 2;
+                        end
+                        else if (last_tkeep == 8'b11111111) begin
+                            mod_last_tkeep   <= 8'b00111111;   // 8 -> 6
+                            mod_beat_counter <= beat_counter + 2;
+                        end
+                        else begin
+                            // fallback if keep is invalid / non-contiguous
+                            mod_last_tkeep   <= last_tkeep;
+                            mod_beat_counter <= beat_counter;
+                        end
+                    end
+                    else begin
+                        // no CFH insertion -> unchanged packet size
+                        mod_beat_counter <= beat_counter;
+                        mod_last_tkeep   <= last_tkeep;
+                    end
+                
+                    state <= IDLE;
+                end
                 // -------------------------------------------------------------
                 // DROP
                 // -------------------------------------------------------------
                 DROP_PKT: begin
                     drop_packet <= 1'b1;
                     valid       <= 1'b1;
+                    score_cap_deg <= cpu_info + total_in_q + max_cap + memory_usage + max_retry_in_count + max_retry_out_count  + max_retry_per_req;
                     state       <= IDLE;
                 end
 

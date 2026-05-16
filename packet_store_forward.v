@@ -111,7 +111,7 @@ assign bram_write_en = (phase == PHASE_ANALYZE) ? ana_write_en : parent_write_en
 
 
 
-localparam [7:0]  CFH_MSG     = 8'd4;
+localparam [7:0]  CFH_MSG     = 8'd1;
 localparam [7:0]  TTL         = 8'd4;
 localparam [31:0] LB_ID       = 32'd4;
 localparam [31:0] RDMA_CONFIG = 32'd4;
@@ -142,10 +142,13 @@ localparam [7:0] CFH_B12 = TTL;
 localparam [7:0] CFH_B13 = CFH_MSG;
 
 
-localparam CFH_HEADER = {CFH_B0, CFH_B1, CFH_B2, CFH_B3, CFH_B4, CFH_B5, CFH_B6, CFH_B7, CFH_B8, CFH_B9, CFH_B10, CFH_B11, CFH_B12, CFH_B13};
+localparam CFH_HEADER = {CFH_B0 , CFH_B1, CFH_B2, CFH_B3, CFH_B4, CFH_B5, CFH_B6, CFH_B7, CFH_B8, CFH_B9, CFH_B10, CFH_B11, CFH_B12, CFH_B13};
 localparam WRITE_CFH_BEATS = 42/8;
 localparam BYTE_START =42%8;
 ////////////////////////
+
+
+
 
 //packet analysis module
 wire need_cfh_header;
@@ -155,7 +158,6 @@ reg cfh_header_stage_2;
 reg [63:0] saved_data_out;
 reg [63-BYTE_START*8:0] for_next_clk;
 reg send_phase_shutdown_3;
-
 
 analyse_stored_packet analyse_packet_inst (
     .clk(clk),
@@ -224,7 +226,6 @@ always @(posedge clk) begin
         send_phase_shutdown_3 <= 0;
     end
     else begin
-     
         // lock valid packets in a reg and only accept when send_phase = 0
         parent_write_en <= 0;
         if (send_phase == 0)

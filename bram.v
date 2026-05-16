@@ -42,6 +42,7 @@ input write_en
         if(rst)
         begin
            data_out <= 0;
+
         end
         
         else
