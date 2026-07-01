@@ -116,7 +116,7 @@ localparam [7:0]  TTL         = 8'd4;
 localparam [31:0] LB_ID       = 32'd4;
 localparam [31:0] RDMA_CONFIG = 32'd4;
 localparam [31:0] HOST_ID     = 32'd4;
-localparam [15:0] EXTRA_LEN   = 16'd14;   // bytes to be inserted later by parent
+localparam [15:0] EXTRA_LEN   = 16'd18;   // bytes to be inserted later by parent
 localparam [3:0]  THRESH      = 4'd5;
 
 
@@ -155,9 +155,14 @@ wire need_cfh_header;
 reg write_cfh;
 reg cfh_header_stage_1;
 reg cfh_header_stage_2;
-reg [63:0] saved_data_out;
+reg cfh_header_stage_3;
+reg [63:0] saved_data_out_1;
+reg [63:0] saved_data_out_2;
 reg [63-BYTE_START*8:0] for_next_clk;
 reg send_phase_shutdown_3;
+
+// RDMA authentication
+wire [31:0] rdma_auth;
 
 analyse_stored_packet analyse_packet_inst (
     .clk(clk),
@@ -177,7 +182,8 @@ analyse_stored_packet analyse_packet_inst (
     .valid(valid_packet),
     .need_cfh_header(need_cfh_header),
     .mod_beat_counter(changed_beat_counter),
-    .mod_last_tkeep(changed_last_tkeep)
+    .mod_last_tkeep(changed_last_tkeep),
+    .rdma_auth(rdma_auth)
 );
 
 
@@ -217,7 +223,9 @@ always @(posedge clk) begin
         send_phase<=0;
         cfh_header_stage_1 <= 0;
         cfh_header_stage_2 <= 0;
-        saved_data_out     <= 0;
+        cfh_header_stage_3 <= 0;
+        saved_data_out_1     <= 0;
+        saved_data_out_2     <= 0;
         for_next_clk       <= 0;
         send_phase_warmup     <= 0;
         send_phase_shutdown   <= 0;
@@ -238,7 +246,9 @@ always @(posedge clk) begin
                 mod_last_tkeep <= changed_last_tkeep;
                 cfh_header_stage_1 <= 0;
                 cfh_header_stage_2 <= 0;
-                saved_data_out     <= 0;
+                cfh_header_stage_3 <= 0;
+                saved_data_out_1     <= 0;
+                saved_data_out_2     <= 0;
                 for_next_clk       <= 0;
                 send_phase_warmup<=1;
                 parent_r_add <= 0;
@@ -368,7 +378,8 @@ always @(posedge clk) begin
         end
         else if ((write_cfh == 1'b1) &&
                 (cfh_header_stage_1 == 1'b0) &&
-                (cfh_header_stage_2 == 1'b0))
+                (cfh_header_stage_2 == 1'b0) &&
+                (cfh_header_stage_3 == 1'b0))
         begin
             // first beat where header starts:
             // keep first BYTE_START bytes from original beat,
@@ -389,7 +400,7 @@ always @(posedge clk) begin
             // IMPORTANT:
             // while we are outputting this extra CFH beat, BRAM has already advanced.
             // capture that data_out so we do not lose the first post-header source beat.
-            saved_data_out <= data_out;
+            saved_data_out_1 <= data_out;
 
             cfh_header_stage_1 <= 1'b0;
             cfh_header_stage_2 <= 1'b1;
@@ -399,13 +410,24 @@ always @(posedge clk) begin
             // shifted path stays active for the rest of the packet
             // emit low BYTE_START bytes from saved_data_out
             // and remaining bytes from previous carry
-            m_axis_tdata <= {saved_data_out[0 +: BYTE_START*8], for_next_clk};
+            m_axis_tdata <=  {for_next_clk[31:0],rdma_auth[7:0],rdma_auth[15:8],rdma_auth[23:16],rdma_auth[31:24]};
 
             // update carry for next shifted beat
-            for_next_clk <= saved_data_out[63:BYTE_START*8];
+            //for_next_clk[] <= saved_data_out[63:BYTE_START*8];
 
             // capture next BRAM word for the next shifted beat
-            saved_data_out <= data_out;
+            saved_data_out_2 <= data_out;
+            
+            cfh_header_stage_3 <=1'b1;
+            cfh_header_stage_2 <=1'b0;
+        end
+        else if (cfh_header_stage_3 == 1'b1)
+        begin
+            m_axis_tdata <= {saved_data_out_1[47:0],for_next_clk[47:32]};
+            for_next_clk[47:32] <= saved_data_out_1[63:48];
+            saved_data_out_1 <= saved_data_out_2;
+            saved_data_out_2 <= data_out;
+            
         end
         else
         begin
@@ -423,7 +445,7 @@ always @(posedge clk) begin
             m_axis_tkeep <= 8'hff;
             m_axis_tvalid <= 1'b1;
             m_axis_tlast  <= 1'b0;
-            if (write_cfh == 1'b1 && cfh_header_stage_2 == 1'b1)
+            if (write_cfh == 1'b1 && cfh_header_stage_3 == 1'b1)
             begin
                 // CFH shifted stream still has pipeline data to flush
                 send_phase_shutdown   <= 1'b1;
@@ -446,15 +468,17 @@ always @(posedge clk) begin
         m_axis_tvalid <= 1;
         cfh_header_stage_1 <= 0;
         cfh_header_stage_2 <= 0;
-        saved_data_out     <= 0;
+        cfh_header_stage_3 <= 0;
+        saved_data_out_1     <= 0;
+        saved_data_out_2     <= 0;
         for_next_clk       <= 0;
         write_cfh <= 0;
         phase <= PHASE_IDLE;
         
-        if (write_cfh == 1'b1 && cfh_header_stage_2 == 1'b1)
+        if (write_cfh == 1'b1 && cfh_header_stage_3 == 1'b1)
         begin
             // flush beat 1: emit buffered source beat + previous carry
-            m_axis_tdata <= {saved_data_out[0 +: BYTE_START*8], for_next_clk};
+            m_axis_tdata <= {saved_data_out_1[47:0],for_next_clk[47:32]};
             m_axis_tkeep <= mod_last_tkeep;
             m_axis_tuser <= packet_tuser[(write_beat_count-2)*RX_USER_WIDTH +: RX_USER_WIDTH];
             send_phase_shutdown   <= 1'b0;

@@ -24,7 +24,7 @@ module analyse_stored_packet #(
     parameter [31:0] LB_ID       = 32'd4,
     parameter [31:0] RDMA_CONFIG = 32'd4,
     parameter [31:0] HOST_ID     = 32'd4,
-    parameter [15:0] EXTRA_LEN   = 16'd14  // bytes to be inserted later by parent
+    parameter [15:0] EXTRA_LEN   = 16'd18  // bytes to be inserted later by parent
     
 )(
     input  wire        clk,
@@ -54,7 +54,8 @@ module analyse_stored_packet #(
     // optional scraped telemetry for other packet type
     output reg  [7:0]  host_tel_data_A,
     output reg  [31:0] host_tel_data_B,
-    output reg  [31:0] host_tel_data_C
+    output reg  [31:0] host_tel_data_C,
+    output reg  [31:0] rdma_auth
 );
 
 
@@ -73,7 +74,7 @@ module analyse_stored_packet #(
     // checksum precompute
     // -------------------------------------------------------------------------
 
-    localparam [15:0] OLD_UDP_DST_PORT = 16'd4791;
+    localparam [15:0] OLD_UDP_DST_PORT = 16'd4793;
     localparam [15:0] NEW_UDP_DST_PORT = 16'd49112;
     
     localparam [15:0] TELE_DST_PORT = 16'd8888;
@@ -121,7 +122,7 @@ module analyse_stored_packet #(
         add1c16(UDP_PORT_DELTA, CFH_CONST_SUM);
 
     localparam [15:0] PRECOMP_UDP_DELTA_CONST =
-        add1c16(PRECOMP_UDP_DELTA, 16'd14);
+        add1c16(PRECOMP_UDP_DELTA, 16'd18);
         
     localparam [4:0]
         IDLE                    = 5'd0,
@@ -152,7 +153,8 @@ module analyse_stored_packet #(
         
         TELE_0_READ_WAIT        = 5'd17,
         TELE_1_READ_WAIT        = 5'd18,
-        TELE_2_READ_WAIT        = 5'd19;
+        TELE_2_READ_WAIT        = 5'd19,
+        TELE_3_READ_WAIT        = 5'd20;
 
     reg [4:0] state;
     reg [15:0] temp_data;
@@ -178,6 +180,7 @@ module analyse_stored_packet #(
     reg [4:0] max_retry_in_count;   
     reg [4:0] max_retry_out_count; 
     reg [4:0] max_retry_per_req;
+    
     reg [7:0] experiment_threshold;
     
     reg [7:0] score_cap_deg;            
@@ -326,6 +329,7 @@ module analyse_stored_packet #(
                     total_in_q <= (data_out[24+:7]>>2);
                     max_cap <= (data_out[56+:7]>>4);
                     state <= TELE_2_READ_WAIT;
+                    r_add <= 7;
                     
                 end
                 
@@ -335,7 +339,14 @@ module analyse_stored_packet #(
                     max_retry_in_count <= data_out[8+:7]>>3;
                     max_retry_out_count <= data_out[24+:7]>>4;
                     max_retry_per_req <= data_out[40+:7]>>3;
-                    experiment_threshold <= data_out[48+:8];
+                    rdma_auth[31:16] <= {data_out[48+:8],data_out[56+:8]};
+                    
+                    state <= TELE_3_READ_WAIT;
+                end
+                
+                TELE_3_READ_WAIT: begin
+                    rdma_auth[15:0] <= {data_out[0+:8],data_out[8+:8]};
+                    experiment_threshold <= data_out[24+:8];
                     state <= DROP_PKT;
                 end
                 
@@ -390,7 +401,7 @@ module analyse_stored_packet #(
 
                 EDIT_IP_CKS: begin
 
-                   temp_data = ~add1c16(~{data_out[0+:8],data_out[8+:8]}, 16'd14);
+                   temp_data = ~add1c16(~{data_out[0+:8],data_out[8+:8]}, 16'd18);
                    data_in <= {data_out[63:16],temp_data[0+:8],temp_data[8+:8]};
                       
 
@@ -435,39 +446,38 @@ module analyse_stored_packet #(
                         // Explicit remap of last beat occupancy and final beat index
                 
                         if (last_tkeep == 8'b00000001) begin
-                            mod_last_tkeep   <= 8'b01111111;   // 1 -> 7
-                            mod_beat_counter <= beat_counter + 1;
+                            mod_last_tkeep   <= 8'b00000111;   // 1 + 18 = 19 -> 3
+                            mod_beat_counter <= beat_counter + 2;
                         end
                         else if (last_tkeep == 8'b00000011) begin
-                            mod_last_tkeep   <= 8'b11111111;   // 2 -> 8
-                            mod_beat_counter <= beat_counter + 1;
+                            mod_last_tkeep   <= 8'b00001111;   // 2 + 18 = 20 -> 4
+                            mod_beat_counter <= beat_counter + 2;
                         end
                         else if (last_tkeep == 8'b00000111) begin
-                            mod_last_tkeep   <= 8'b00000001;   // 3 -> 1
+                            mod_last_tkeep   <= 8'b00011111;   // 3 + 18 = 21 -> 5
                             mod_beat_counter <= beat_counter + 2;
                         end
                         else if (last_tkeep == 8'b00001111) begin
-                            mod_last_tkeep   <= 8'b00000011;   // 4 -> 2
+                            mod_last_tkeep   <= 8'b00111111;   // 4 + 18 = 22 -> 6
                             mod_beat_counter <= beat_counter + 2;
                         end
                         else if (last_tkeep == 8'b00011111) begin
-                            mod_last_tkeep   <= 8'b00000111;   // 5 -> 3
+                            mod_last_tkeep   <= 8'b01111111;   // 5 + 18 = 23 -> 7
                             mod_beat_counter <= beat_counter + 2;
                         end
                         else if (last_tkeep == 8'b00111111) begin
-                            mod_last_tkeep   <= 8'b00001111;   // 6 -> 4
-                            mod_beat_counter <= beat_counter + 2;
+                            mod_last_tkeep   <= 8'b11111111;   // 6 + 18 = 24 -> 8
+                            mod_beat_counter <= beat_counter + 3;
                         end
                         else if (last_tkeep == 8'b01111111) begin
-                            mod_last_tkeep   <= 8'b00011111;   // 7 -> 5
-                            mod_beat_counter <= beat_counter + 2;
+                            mod_last_tkeep   <= 8'b00000001;   // 7 + 18 = 25 -> 1
+                            mod_beat_counter <= beat_counter + 3;
                         end
                         else if (last_tkeep == 8'b11111111) begin
-                            mod_last_tkeep   <= 8'b00111111;   // 8 -> 6
-                            mod_beat_counter <= beat_counter + 2;
+                            mod_last_tkeep   <= 8'b00000011;   // 8 + 18 = 26 -> 2
+                            mod_beat_counter <= beat_counter + 3;
                         end
                         else begin
-                            // fallback if keep is invalid / non-contiguous
                             mod_last_tkeep   <= last_tkeep;
                             mod_beat_counter <= beat_counter;
                         end
@@ -484,6 +494,7 @@ module analyse_stored_packet #(
                 // DROP
                 // -------------------------------------------------------------
                 DROP_PKT: begin
+                    
                     drop_packet <= 1'b1;
                     valid       <= 1'b1;
                     score_cap_deg <= cpu_info + total_in_q + max_cap + memory_usage + max_retry_in_count + max_retry_out_count  + max_retry_per_req;
